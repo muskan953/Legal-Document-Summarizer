@@ -144,6 +144,6 @@ def process_statute(pdf_path, statute_name, output_dir):
 if __name__ == "__main__":
     output_dir = "extracted_statutes"
     os.makedirs(output_dir, exist_ok=True)
-    files = [{'pdf': 'BNS.pdf', 'name': 'Bharatiya Nyaya Sanhita'}]  # List all files here
+    files = [{'pdf': 'Dataset\Data_BNS_BNSS_BSA\Actual Law\BNS.pdf', 'name': 'Bharatiya Nyaya Sanhita'}]  # List all files here
     for file in files:
         process_statute(file['pdf'], file['name'], output_dir)
