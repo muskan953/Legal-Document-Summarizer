@@ -1,149 +1,124 @@
+import os
 import re
 import json
-import os
 import pdfplumber
 import logging
-import sys
-from pathlib import Path
-from tqdm import tqdm
 
-# ---------------------- Setup Logging ---------------------------
 def setup_logging():
     log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler = logging.FileHandler("statute_extraction.log", encoding='utf-8')
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler()
     console_handler.setFormatter(log_formatter)
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    logger.addHandler(file_handler)
     logger.addHandler(console_handler)
     return logger
 
 logger = setup_logging()
 
-
-# ---------------------- Extract Text from PDF ---------------------------
-def extract_text_from_pdf(pdf_path):
+def extract_text_from_pdf(pdf_path, margin=50):
     if not os.path.exists(pdf_path):
         logger.error(f"File not found: {pdf_path}")
         return ""
-
     text = ""
     try:
         with pdfplumber.open(pdf_path) as pdf:
             logger.info(f"Processing {len(pdf.pages)} pages from {pdf_path}")
-            for page in tqdm(pdf.pages, desc="Extracting pages"):
-                page_text = page.extract_text() or ""
-                text += f"\n{page_text}\n"
+            for page in pdf.pages:
+                # Crop out left/right margins by defining a bounding box.
+                bbox = (margin, 0, page.width - margin, page.height)
+                page_text = page.within_bbox(bbox).extract_text() or ""
+                text += "\n" + page_text + "\n"
     except Exception as e:
         logger.error(f"Error reading {pdf_path}: {e}")
     return text.strip()
 
-
-# ---------------------- Clean & Trim Text ---------------------------
 def preprocess_text(text):
-    # Remove PAGE markers and Gazette headers/footers
+    # Remove common page markers, headers or footers.
     text = re.sub(r'\[PAGE\s*\d+\]', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'THE\s*GAZETTE\s*OF\s*INDIA\s*EXTRAORDINARY\s*\[.*?\]', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'[_\-–—=]{5,}', '', text)
-    text = re.sub(r'\b(PART\s*II|Hkkx II — \[k\.M 1|EXTRAORDINARY|vlk/kkj\.k|PUBLISHED BY AUTHORITY)\b.*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'THE\s+GAZETTE\s+OF\s+INDIA\s+EXTRAORDINARY.*?(?=\d)', '', text, flags=re.IGNORECASE)
+    # Normalize whitespace to help mitigate OCR issues (run-on words, etc.)
+    text = re.sub(r'\s+', ' ', text)
+    return text
 
-    # Normalize spaces and fix hyphenated line breaks
-    text = re.sub(r'\n{3,}', '\n\n', text)  # Remove excessive newlines
-    text = re.sub(r'\s+', ' ', text)  # Normalize all spaces
-    text = re.sub(r'([a-z])- *\n *([a-z])', r'\1\2', text, flags=re.IGNORECASE)  # Hyphenation
-    text = re.sub(r'([^\n])\n([^\n])', r'\1 \2', text)  # Newline in middle of sentence
-    # Pre-normalizing possible inline section number issues
-    #text = re.sub(r'(?<!\n)(\d{1,3}[A-Z]?\.)\s', r'\n\1 ', text)
-
-    # Trim to start from "CHAPTER I" or "1."
-    chapter_1_index = re.search(r'(CHAPTER\s*I\b)', text, re.IGNORECASE)
-    if chapter_1_index:
-        text = text[chapter_1_index.start():]
-        logger.info("✅ Trimmed text to start from 'CHAPTER I'.")
-    else:
-        section_1_index = re.search(r'^\s*1\.\s', text, re.MULTILINE)
-        if section_1_index:
-            text = text[section_1_index.start():]
-            logger.warning("⚠️ Could not find 'CHAPTER I', starting from 'Section 1' instead.")
-        else:
-            logger.warning("⚠️ Could not find 'CHAPTER I' or 'Section 1'. Check document formatting.")
-
-    return text.strip()
-
-
-# ---------------------- Split Sections ---------------------------
-def split_sections_by_number(text, statute_name):
+def extract_chapters(text):
     """
-    Split sections based on section numbers like '1. (1) ...' appearing inline or at fresh line.
+    Splits the text into chapters using markers like "CHAPTER I", "CHAPTERII", etc.
+    Any text before the first chapter is labeled "Preliminary".
     """
-    text = re.sub(r'(?<!\n)(\d{1,3}[A-Z]?\.)\s*\(1\)', r'\n\1 (1)', text)
+    chapters = []
+    # Updated pattern allows zero or more spaces between "CHAPTER" and the numeral.
+    chapter_pattern = re.compile(r'(CHAPTER\s*[IVXLCDM]+)', re.IGNORECASE)
+    splits = chapter_pattern.split(text)
+    if splits and splits[0].strip():
+        chapters.append(("Preliminary", splits[0].strip()))
+    for i in range(1, len(splits), 2):
+        chapter_title = splits[i].strip()
+        chapter_text = splits[i+1].strip() if (i+1) < len(splits) else ""
+        chapters.append((chapter_title, chapter_text))
+    return chapters
 
-    # Regex to capture sections whether inline or newline
-    pattern = (
-        r'(?:^|\n|\s)'                 # Start from line start or inline after space/newline
-        r'(\d{1,3}[A-Z]?)\.\s*'       # Section number like 1. or 36A.
-        r'((?:.|\n)*?)'               # Content non-greedy until next section
-        r'(?=\n\d{1,3}[A-Z]?\.\s|\s\d{1,3}[A-Z]?\.\s|\Z)'  # Stop before next section or end
-    )
-
-    matches = re.findall(pattern, text, re.MULTILINE)
-    
-    if not matches:
-        logger.error("❌ No sections found. Please check formatting.")
-        return []
-
+def extract_sections(chapter_text, chapter_title, statute_name):
     sections = []
-    for sec_num, content in matches:
-        num = sec_num.strip('.')
-        # Filter out any wrong section numbers, assuming max 358
-        if num.isdigit() and int(num) > 358:
-            continue  # Skip beyond valid sections
-
-        # Strip unwanted leading/trailing whitespace
-        content = content.strip()
-        if not content:
-            continue  # Skip empty contents
-
+    # Use a regex that matches a number (1-3 digits) followed by a dot at a word boundary.
+    section_pattern = re.compile(r'(?<!\S)(\d{1,3})\.\s*')
+    matches = list(section_pattern.finditer(chapter_text))
+    previous_section_num = 0
+    for i, match in enumerate(matches):
+        sec_num = match.group(1)
+        current_num = int(sec_num)
+        start_index = match.end()
+        end_index = matches[i+1].start() if i+1 < len(matches) else len(chapter_text)
+        content = chapter_text[start_index:end_index].strip()
+        # If the current section number is less than or equal to the previous one,
+        # assume this is an internal subheading/paragraph and merge its content.
+        if current_num <= previous_section_num:
+            if sections:
+                sections[-1]["content"] += " " + content
+            else:
+                sections.append({
+                    "section_number": sec_num,
+                    "content": content,
+                    "chapter": chapter_title,
+                    "statute": statute_name
+                })
+            continue
         sections.append({
-            "section_number": num,
+            "section_number": sec_num,
             "content": content,
+            "chapter": chapter_title,
             "statute": statute_name
         })
-
-    logger.info(f"✅ Extracted {len(sections)} valid sections for {statute_name}.")
+        previous_section_num = current_num
     return sections
 
+def extract_all_sections(text, statute_name):
+    cleaned_text = preprocess_text(text)
+    chapters = extract_chapters(cleaned_text)
+    all_sections = []
+    if not chapters:
+        all_sections = extract_sections(cleaned_text, "Entire Document", statute_name)
+    else:
+        for chapter_title, chapter_text in chapters:
+            sections = extract_sections(chapter_text, chapter_title, statute_name)
+            all_sections.extend(sections)
+    return all_sections
 
-# ---------------------- Main Pipeline ---------------------------
 def process_statute(pdf_path, statute_name, output_dir):
     logger.info(f"📄 Processing file: {pdf_path}")
     raw_text = extract_text_from_pdf(pdf_path)
     if not raw_text:
-        logger.error("❌ No text extracted from PDF. Skipping file.")
+        logger.error(f"❌ No text extracted from {pdf_path}. Skipping.")
         return
-
-    # Preprocess text to clean it first
-    clean_text = preprocess_text(raw_text)
-    raw_output_path = os.path.join(output_dir, f"{Path(pdf_path).stem}_raw.txt")
-    with open(raw_output_path, 'w', encoding='utf-8') as f:
-        f.write(clean_text)
-    logger.info(f"✅ Saved cleaned raw text to: {raw_output_path}")
-
-    # Split and process sections
-    sections = split_sections_by_number(clean_text, statute_name)
-
-    # Save final JSON output
-    json_output_path = os.path.join(output_dir, f"{Path(pdf_path).stem}_sections.json")
-    with open(json_output_path, 'w', encoding='utf-8') as f:
+    sections = extract_all_sections(raw_text, statute_name)
+    output_file = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(pdf_path))[0]}_sections.json")
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(sections, f, ensure_ascii=False, indent=2)
-    logger.info(f"✅ Final sections JSON saved to: {json_output_path}")
+    logger.info(f"✅ Extracted {len(sections)} sections for {statute_name}.")
+    logger.info(f"✅ Final sections JSON saved to: {output_file}")
 
-
-# ---------------------- Run ---------------------------
 if __name__ == "__main__":
     output_dir = "extracted_statutes"
     os.makedirs(output_dir, exist_ok=True)
-    files = [{'pdf': 'Dataset\Data_BNS_BNSS_BSA\Actual Law\BNS.pdf', 'name': 'Bharatiya Nyaya Sanhita'}]  # List all files here
-    for file in files:
-        process_statute(file['pdf'], file['name'], output_dir)
+    pdf_path = "Dataset/Data_BNS_BNSS_BSA/Actual Law/BNS.pdf"  # Update this path as needed.
+    statute_name = "Bharatiya Nyaya Sanhita"
+    process_statute(pdf_path, statute_name, output_dir)
