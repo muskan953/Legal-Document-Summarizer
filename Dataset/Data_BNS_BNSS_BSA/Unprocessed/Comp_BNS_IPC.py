@@ -48,11 +48,11 @@ def generate_json_from_excel(excel_path, json_output_path, sheet_name='Sheet1'):
                 summary = ""
     
             record = {
-                "bns_section": str(row['BNS Sections/ Subsections']).strip(),
-                "bns_subject": str(row['Subject']).strip(),
-                "ipc_section": str(row['IPC Sections']).strip(),
-                "ipc_subject": str(row['Subject']).strip(),  # Using the same subject for IPC
-                "summary": summary,
+                "bns_section": str(row['BNS Sections/ Subsections']).strip().replace("\n", " ").replace("\r", " "),
+                "bns_subject": str(row['Subject']).strip().replace("\n", " ").replace("\r", " "),
+                "ipc_section": str(row['IPC Sections']).strip().replace("\n", " ").replace("\r", " "),
+                "ipc_subject": str(row['Subject']).strip().replace("\n", " ").replace("\r", " "),
+                "summary": summary.replace("\n", " ").replace("\r", " "),
             }
             records.append(record)
     
@@ -87,16 +87,14 @@ def check_chunk_size(json_records, tokenizer, threshold=510):
             print(f"Record (IPC Section {record['ipc_section']} / BNS Section {record['bns_section']}) exceeds threshold: {chunk_size} tokens.")
     print("Chunk size check complete.")
 
-# Define file paths (using raw strings to handle backslashes correctly)
-excel_file_path = r"d:\Legal-Document-Summarizer\Dataset\Data_BNS_BNSS_BSA\Unprocessed\COMPARISON_SUMMARY_BNS_IPC.xlsx"
-json_file_path = r'd:\Legal-Document-Summarizer\Dataset\Comparative\IPC_BNS_mapping.json'
+def main():
+    excel_file_path = r"d:\Legal-Document-Summarizer\Dataset\Data_BNS_BNSS_BSA\Unprocessed\COMPARISON_SUMMARY_BNS_IPC.xlsx"
+    json_file_path = r'd:\Legal-Document-Summarizer\Dataset\Data_BNS_BNSS_BSA\Comparative\IPC_BNS_mapping.json'
 
-# Generate the JSON file from the Excel data.
-records = generate_json_from_excel(excel_file_path, json_file_path)
+    records = generate_json_from_excel(excel_file_path, json_file_path)
 
-# Load the InLegalBERT tokenizer.
-# Replace "law-ai/InLegalBERT" with the correct model identifier if needed.
-tokenizer = AutoTokenizer.from_pretrained("law-ai/InLegalBERT")
+    tokenizer = AutoTokenizer.from_pretrained("law-ai/InLegalBERT")
+    check_chunk_size(records, tokenizer)
 
-# Check and print the chunk size for records with a token count greater than 510.
-check_chunk_size(records, tokenizer, threshold=510)
+if __name__ == "__main__":
+    main()
